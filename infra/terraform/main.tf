@@ -1,5 +1,14 @@
 # infra/terraform/main.tf
 
+# Terraform Remote State Configuration
+# terraform {
+#   backend "s3" {
+#     bucket = "your-terraform-state-bucket"
+#     key    = "ai-prime/terraform.tfstate"
+#     region = "us-west-2"
+#   }
+# }
+
 # Networking
 provider "aws" {
   region = var.aws_region
@@ -24,40 +33,40 @@ resource "aws_internet_gateway" "main" {
 }
 
 resource "aws_subnet" "public" {
-  count             = length(var.public_subnet_cidr_blocks)
+  for_each          = toset(var.public_subnet_cidr_blocks)
   vpc_id            = aws_vpc.main.id
-  cidr_block        = var.public_subnet_cidr_blocks[count.index]
-  availability_zone = data.aws_availability_zones.available.names[count.index]
+  cidr_block        = each.key
+  availability_zone = data.aws_availability_zones.available.names[index(var.public_subnet_cidr_blocks, each.key)]
   map_public_ip_on_launch = true
 
   tags = {
-    Name = "ai-prime-public-subnet-${count.index + 1}"
+    Name = "ai-prime-public-subnet-${index(var.public_subnet_cidr_blocks, each.key) + 1}"
   }
 }
 
 resource "aws_subnet" "private" {
-  count             = length(var.private_subnet_cidr_blocks)
+  for_each          = toset(var.private_subnet_cidr_blocks)
   vpc_id            = aws_vpc.main.id
-  cidr_block        = var.private_subnet_cidr_blocks[count.index]
-  availability_zone = data.aws_availability_zones.available.names[count.index]
+  cidr_block        = each.key
+  availability_zone = data.aws_availability_zones.available.names[index(var.private_subnet_cidr_blocks, each.key)]
 
   tags = {
-    Name = "ai-prime-private-subnet-${count.index + 1}"
+    Name = "ai-prime-private-subnet-${index(var.private_subnet_cidr_blocks, each.key) + 1}"
   }
 }
 
 resource "aws_eip" "nat" {
-  count = length(var.public_subnet_cidr_blocks)
+  for_each = toset(var.public_subnet_cidr_blocks)
   domain   = "vpc"
 }
 
 resource "aws_nat_gateway" "main" {
-  count         = length(var.public_subnet_cidr_blocks)
-  allocation_id = aws_eip.nat[count.index].id
-  subnet_id     = aws_subnet.public[count.index].id
+  for_each      = toset(var.public_subnet_cidr_blocks)
+  allocation_id = aws_eip.nat[each.key].id
+  subnet_id     = aws_subnet.public[each.key].id
 
   tags = {
-    Name = "ai-prime-nat-gateway-${count.index + 1}"
+    Name = "ai-prime-nat-gateway-${index(var.public_subnet_cidr_blocks, each.key) + 1}"
   }
 }
 
@@ -75,29 +84,29 @@ resource "aws_route_table" "public" {
 }
 
 resource "aws_route_table" "private" {
-  count  = length(var.private_subnet_cidr_blocks)
-  vpc_id = aws_vpc.main.id
+  for_each = toset(var.private_subnet_cidr_blocks)
+  vpc_id   = aws_vpc.main.id
 
   route {
     cidr_block     = "0.0.0.0/0"
-    nat_gateway_id = aws_nat_gateway.main[count.index].id
+    nat_gateway_id = aws_nat_gateway.main[var.public_subnet_cidr_blocks[index(var.private_subnet_cidr_blocks, each.key)]].id
   }
 
   tags = {
-    Name = "ai-prime-private-rt-${count.index + 1}"
+    Name = "ai-prime-private-rt-${index(var.private_subnet_cidr_blocks, each.key) + 1}"
   }
 }
 
 resource "aws_route_table_association" "public" {
-  count          = length(var.public_subnet_cidr_blocks)
-  subnet_id      = aws_subnet.public[count.index].id
+  for_each       = aws_subnet.public
+  subnet_id      = each.value.id
   route_table_id = aws_route_table.public.id
 }
 
 resource "aws_route_table_association" "private" {
-  count          = length(var.private_subnet_cidr_blocks)
-  subnet_id      = aws_subnet.private[count.index].id
-  route_table_id = aws_route_table.private[count.index].id
+  for_each       = aws_subnet.private
+  subnet_id      = each.value.id
+  route_table_id = aws_route_table.private[each.key].id
 }
 
 data "aws_availability_zones" "available" {}
@@ -123,7 +132,7 @@ resource "aws_ecs_cluster" "main" {
 
 resource "aws_db_subnet_group" "default" {
   name       = "ai-prime-db-subnet-group"
-  subnet_ids = aws_subnet.private[*].id
+  subnet_ids = [for s in aws_subnet.private : s.id]
 }
 
 resource "aws_rds_cluster" "main" {
@@ -150,7 +159,7 @@ resource "aws_rds_cluster_instance" "main" {
 
 resource "aws_elasticache_subnet_group" "main" {
   name       = "ai-prime-cache-subnet-group"
-  subnet_ids = aws_subnet.private[*].id
+  subnet_ids = [for s in aws_subnet.private : s.id]
 }
 
 resource "aws_elasticache_cluster" "main" {
@@ -168,7 +177,7 @@ resource "aws_lb" "main" {
   internal           = false
   load_balancer_type = "application"
   security_groups    = [aws_security_group.lb.id]
-  subnets            = aws_subnet.public[*].id
+  subnets            = [for s in aws_subnet.public : s.id]
 }
 
 resource "aws_lb_target_group" "api" {
@@ -200,7 +209,7 @@ resource "aws_lb_listener" "https" {
   port              = "443"
   protocol          = "HTTPS"
   ssl_policy        = "ELBSecurityPolicy-2016-08"
-  certificate_arn   = "arn:aws:acm:us-west-2:123456789012:certificate/placeholder" # Placeholder
+  certificate_arn   = var.acm_certificate_arn
 
   default_action {
     type             = "forward"
@@ -219,7 +228,7 @@ resource "aws_ecs_task_definition" "api" {
   container_definitions = jsonencode([
     {
       name      = "api"
-      image     = "nginx:stable" # Placeholder
+      image     = "${aws_ecr_repository.api.repository_url}:${var.image_tag}"
       portMappings = [
         {
           containerPort = 8000
@@ -266,7 +275,7 @@ resource "aws_ecs_service" "api" {
   launch_type     = "FARGATE"
 
   network_configuration {
-    subnets         = aws_subnet.private[*].id
+    subnets         = [for s in aws_subnet.private : s.id]
     security_groups = [aws_security_group.ecs_service.id]
   }
 
@@ -387,4 +396,13 @@ resource "aws_iam_policy" "ecs_task_execution_role_secrets_policy" {
 resource "aws_iam_role_policy_attachment" "ecs_task_execution_role_secrets_policy_attachment" {
   role       = aws_iam_role.ecs_task_execution_role.name
   policy_arn = aws_iam_policy.ecs_task_execution_role_secrets_policy.arn
+}
+
+resource "aws_ecr_repository" "api" {
+  name                 = "ai-prime-api"
+  image_tag_mutability = "MUTABLE"
+
+  image_scanning_configuration {
+    scan_on_push = true
+  }
 }

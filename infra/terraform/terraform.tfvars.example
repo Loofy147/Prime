@@ -1,0 +1,4 @@
+# infra/terraform/terraform.tfvars.example
+
+acm_certificate_arn = "arn:aws:acm:us-west-2:123456789012:certificate/your-certificate-id"
+image_tag           = "latest"
