@@ -1,0 +1,17 @@
+# monitoring/slo.yaml
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: api-slos
+data:
+  slos.yaml: |
+    service_level_objectives:
+      - name: "API Query Latency (99th percentile)"
+        goal: 0.999
+        description: "99.9% of API queries should be faster than 2000ms."
+        expression: "histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket[5m])) by (le)) < 2.0"
+      - name: "API Availability"
+        goal: 0.999
+        description: "The API should be available 99.9% of the time."
+        expression: "sum(rate(http_requests_total{status_code!~'5..'}[5m])) / sum(rate(http_requests_total[5m])) > 0.999"
